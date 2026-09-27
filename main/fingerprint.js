@@ -43,7 +43,37 @@ function randomFingerprint() {
     deviceMemory: pick(MEMORIES),
     webgl: pick(WEBGL_CONFIGS),
     canvasSeed: randInt(1, 2147483000),
+    // navigator.connection 口径：与「住宅宽带/wifi」场景自洽，值按指纹稳定
+    net: { rtt: pick([25, 50, 50, 75, 100]), downlink: pick([5, 10, 10, 15]) },
     generatedAt: new Date().toISOString(),
+  };
+}
+
+// 生成与 UA 串严格同源的 Client Hints 元数据。
+// Chromium 的 Sec-CH-UA* 请求头与 navigator.userAgentData 都由这份元数据驱动——
+// 只改 UA 串不改它，会出现「UA 写 126、Client Hints 上报 130（真实内核版本）」的自相矛盾，属字节系风控经典检测点。
+function buildUAMetadata(fp) {
+  const major = fp.chromeMajor;
+  const full = `${major}.0.0.0`;
+  return {
+    brands: [
+      { brand: 'Not_A Brand', version: '8' },
+      { brand: 'Chromium', version: String(major) },
+      { brand: 'Google Chrome', version: String(major) },
+    ],
+    fullVersionList: [
+      { brand: 'Not_A Brand', version: '8.0.0.0' },
+      { brand: 'Chromium', version: full },
+      { brand: 'Google Chrome', version: full },
+    ],
+    fullVersion: full,
+    platform: 'Windows',
+    platformVersion: '10.0.0',
+    architecture: 'x86',
+    bitness: '64',
+    model: '',
+    mobile: false,
+    wow64: false,
   };
 }
 
@@ -59,6 +89,7 @@ function buildInitScript(fp) {
     renderer: fp.webgl.renderer,
     seed: fp.canvasSeed,
     screen: { width: fp.viewport.width, height: fp.viewport.height },
+    net: fp.net || { rtt: 50, downlink: 10 },
   });
   return `
 (() => {
@@ -74,6 +105,25 @@ function buildInitScript(fp) {
   def(navigator, 'deviceMemory', C.mem);
   def(navigator, 'language', C.langs[0]);
   def(navigator, 'languages', Object.freeze(C.langs.slice()));
+
+  // navigator.connection：网络类型/质量自洽（桌面 Chrome 有此 API，缺省反而少见）
+  try {
+    const conn = {
+      effectiveType: '4g',
+      type: 'wifi',
+      downlink: C.net.downlink,
+      rtt: C.net.rtt,
+      saveData: false,
+      onchange: null,
+      addEventListener: function () {},
+      removeEventListener: function () {},
+      dispatchEvent: function () { return false; },
+    };
+    def(navigator, 'connection', conn);
+    if (navigator.connection !== undefined && navigator.connection !== conn) {
+      def(Navigator.prototype, 'connection', conn);
+    }
+  } catch (e) {}
 
   // WebGL 厂商/型号（UNMASKED_VENDOR_WEBGL=37445 / UNMASKED_RENDERER_WEBGL=37446）
   const patchGL = (proto) => {
@@ -144,4 +194,4 @@ function buildInitScript(fp) {
 })();`;
 }
 
-module.exports = { randomFingerprint, buildInitScript };
+module.exports = { randomFingerprint, buildInitScript, buildUAMetadata };

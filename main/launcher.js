@@ -4,7 +4,7 @@
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
-const { buildInitScript } = require('./fingerprint');
+const { buildInitScript, buildUAMetadata } = require('./fingerprint');
 const { startForwarder } = require('./forwarder');
 const { tunnelViaFromConfig } = require('./proxy');
 
@@ -134,6 +134,26 @@ async function launchEnv(env, profilesDir, { headless = false } = {}) {
 
   const homeUrl = env.homeUrl || DOUBAO_URL;
   const page = context.pages()[0] || (await context.newPage());
+
+  // CDP 全量 UA-CH 覆写：UA 串、Accept-Language、Client Hints 元数据三者强制同源。
+  // Chromium 的 Sec-CH-UA* 头与 navigator.userAgentData 由 userAgentMetadata 驱动，
+  // 只在 launchOpts 改 UA 串时 Client Hints 仍按真实内核（Chromium 130）上报——与 UA 串矛盾即风控特征。
+  // 对初始页导航前生效 + 监听后续弹窗页（OAuth 可能开新窗口）。
+  const uaMetadata = buildUAMetadata(fp);
+  const applyUaOverride = async (p) => {
+    try {
+      const cdp = await context.newCDPSession(p);
+      await cdp.send('Network.setUserAgentOverride', {
+        userAgent: fp.userAgent,
+        acceptLanguage: 'en-US',
+        platform: 'Win32',
+        userAgentMetadata: uaMetadata,
+      });
+    } catch (e) { /* 页面/会话已关闭：静默 */ }
+  };
+  await applyUaOverride(page);
+  context.on('page', (p) => { applyUaOverride(p); });
+
   // 首页加载自愈：最多 3 次尝试；加载后检查渲染完整性，样式丢失（资源被代理掉）自动重载
   // 注意：必须挂 .catch——页面/浏览器中途关闭时 waitForTimeout 会抛错，未处理的 rejection 会击杀主进程
   (async () => {
