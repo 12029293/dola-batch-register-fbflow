@@ -32,12 +32,12 @@
 
   <!-- 顶栏 -->
   <header id="topbar">
+    <nav class="view-tabs" id="viewTabs">
+      <button id="tabBatch" class="active" title="批量注册工作台">⚡ 批量注册</button>
+      <button id="tabAccounts" title="账号库：导入 / 删除 / 重置账号">📚 账号库</button>
+    </nav>
     <div class="top-right">
       <div class="pool-stats mono" id="poolStats">可用 -- · 成功 -- · 失败 --</div>
-      <nav class="view-tabs" id="viewTabs">
-        <button id="tabBatch" class="active" title="批量注册工作台">⚡ 批量注册</button>
-        <button id="tabAccounts" title="账号库：导入 / 删除 / 重置账号">📚 账号库</button>
-      </nav>
       <button class="btn-settings" id="btnSettings" title="导出目录 / 代理 / 隐身注册等设置">⚙ 设置</button>
     </div>
   </header>
@@ -45,33 +45,43 @@
   <main>
     <!-- ══════════ 视图①：批量注册 ══════════ -->
     <div id="viewBatch" class="view">
-      <!-- 控制区 -->
+      <!-- 控制区：固定分组仪表条 -->
       <section class="panel control-row" id="controlRow">
         <div class="ctrl">
           <label class="ctrl-label" title="-1 = 无上限：每个待注册账号同时开一个独立环境，直到跑完或手动停止">并发数</label>
-          <div class="cc-wrap">
-            <div class="stepper">
-              <button id="ccMinus" aria-label="减少">−</button>
-              <span id="ccValue" class="mono">8</span>
-              <button id="ccPlus" aria-label="增加">+</button>
-            </div>
-            <button id="ccUnlimited" class="pill-toggle" title="无上限：每个待注册账号同时开一个环境，直至跑完">∞ 无上限</button>
+          <div class="stepper">
+            <button id="ccMinus" aria-label="减少">−</button>
+            <span id="ccValue" class="mono">∞</span>
+            <button id="ccPlus" aria-label="增加">+</button>
+            <button id="ccUnlimited" class="cc-inf" title="无上限：每个待注册账号同时开一个环境，直至跑完">∞</button>
           </div>
         </div>
+        <div class="ctrl-divider" aria-hidden="true"></div>
         <div class="ctrl">
           <label class="ctrl-label" title="0 = 注册完账号库所有可用账号；断点续跑：中断后再点开始会自动接着注册">本轮限量</label>
           <input type="number" id="maxCount" class="input num-input" value="0" min="0" step="1" />
         </div>
-        <label class="ctrl chk" title="批量正常跑完后 60 秒自动关机（夜间挂机用）；取消关机请运行 shutdown /a">
-          <input type="checkbox" id="chkShutdown" /> 跑完关机
-        </label>
+        <div class="ctrl-divider" aria-hidden="true"></div>
+        <div class="ctrl">
+          <label class="ctrl-label" title="批量正常跑完后 60 秒自动关机（夜间挂机用）；取消关机请运行 shutdown /a">跑完关机</label>
+          <label class="switch">
+            <input type="checkbox" id="chkShutdown" />
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div class="ctrl-divider" aria-hidden="true"></div>
         <div class="ctrl budget-ctrl">
           <label class="ctrl-label">提取预算 <span id="budgetText" class="mono">0/0</span></label>
           <div class="bar"><div class="bar-fill" id="budgetBar"></div></div>
         </div>
         <div class="ctrl grow"></div>
-        <button class="btn-secondary" id="btnChainCheck" title="开始批量前预检：Clash 线路 → 隧道 CONNECT → 出口归属 → Dola 可达（消耗 1 次提取额度）">🩺 链路体检</button>
-        <button class="btn-primary" id="btnStart">开始批量注册</button>
+        <div class="ctrl actions">
+          <label class="ctrl-label">&nbsp;</label>
+          <div class="actions-row">
+            <button class="btn-secondary" id="btnChainCheck" title="开始批量前预检：Clash 线路 → 隧道 CONNECT → 出口归属 → Dola 可达（消耗 1 次提取额度）">🩺 链路体检</button>
+            <button class="btn-primary" id="btnStart">开始批量注册</button>
+          </div>
+        </div>
       </section>
 
       <div id="chainResult" class="guide hidden"></div>
@@ -85,7 +95,11 @@
       <section class="panel" id="workerPanel">
         <div class="panel-title">并发队列 <span class="muted" id="queueInfo"></span></div>
         <div class="worker-grid" id="workerGrid">
-          <div class="empty-hint" id="workerEmpty">尚未开始。完成配置后点「开始批量注册」，每个账号一张卡片，实时显示进度。</div>
+          <div class="empty-state" id="workerEmpty">
+            <div class="empty-icon" aria-hidden="true">🚀</div>
+            <div class="empty-title">尚未开始</div>
+            <div class="empty-sub">完成配置后点「开始批量注册」，每个账号一张卡片，实时显示进度。<br>建议先点「🩺 链路体检」确认链路通畅。</div>
+          </div>
         </div>
       </section>
     </div>

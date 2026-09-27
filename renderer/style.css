@@ -88,7 +88,7 @@ body.is-maximized #iconMax { display: none; }
 /* ---------- 顶栏 ---------- */
 #topbar {
   position: sticky; top: 38px; z-index: 20;
-  display: flex; align-items: center; justify-content: flex-end;
+  display: flex; align-items: center; justify-content: space-between;
   padding: 12px 22px;
   background: rgba(13, 15, 20, 0.72);
   backdrop-filter: blur(20px);
@@ -135,11 +135,19 @@ body.is-maximized #iconMax { display: none; }
 .icon-btn:hover { background: var(--panel-hover); color: var(--text); }
 
 /* ---------- 主区 ---------- */
+body {
+  display: flex; flex-direction: column; overflow: hidden;
+}
 main {
   position: relative; z-index: 1;
-  max-width: 1180px; margin: 0 auto; padding: 18px 22px 40px;
+  flex: 1; min-height: 0;
+  max-width: 1180px; margin: 0 auto; width: 100%;
+  padding: 18px 22px 22px;
+  overflow-y: auto;
 }
-.view { display: flex; flex-direction: column; gap: 14px; }
+.view { display: flex; flex-direction: column; gap: 14px; height: 100%; }
+#viewBatch { min-height: 0; }
+#viewAccounts { min-height: 0; }
 
 .panel {
   background: var(--panel);
@@ -156,30 +164,45 @@ main {
   text-transform: none; margin-bottom: 12px; letter-spacing: 0.4px;
 }
 
-/* ---------- 控制区 ---------- */
-.control-row { display: flex; align-items: center; gap: 22px; }
-.ctrl { display: flex; flex-direction: column; gap: 5px; }
+/* ---------- 控制区：固定分组仪表条 ---------- */
+.control-row { display: flex; align-items: stretch; gap: 18px; }
+.ctrl { display: flex; flex-direction: column; gap: 6px; justify-content: space-between; }
 .ctrl.grow { flex: 1; }
 .ctrl-label { font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; gap: 12px; }
+.ctrl-divider { width: 1px; background: var(--panel-border); margin: 3px 0; flex: none; }
 
-.cc-wrap { display: flex; align-items: center; gap: 8px; }
-.stepper { display: flex; align-items: center; gap: 2px; border: 1px solid var(--panel-border); border-radius: 9px; padding: 2px; background: rgba(0,0,0,0.18); }
+.stepper { display: flex; align-items: stretch; gap: 2px; border: 1px solid var(--panel-border); border-radius: 9px; padding: 2px; background: rgba(0,0,0,0.18); }
 .stepper button {
-  width: 26px; height: 24px; border: none; background: transparent; color: var(--text-2);
+  width: 26px; height: 26px; border: none; background: transparent; color: var(--text-2);
   font-size: 15px; cursor: pointer; border-radius: 7px;
 }
 .stepper button:hover { background: var(--panel-hover); color: var(--text); }
 .stepper button:disabled { opacity: 0.35; cursor: not-allowed; }
-.stepper span { min-width: 34px; text-align: center; font-weight: 600; }
+.stepper span { min-width: 38px; text-align: center; font-weight: 600; align-self: center; }
+/* ∞ 无上限档位（内嵌步进器右端） */
+.stepper .cc-inf { border-left: 1px solid var(--panel-border); border-radius: 0 7px 7px 0; color: var(--text-3); font-size: 13px; }
+.stepper .cc-inf:hover { color: var(--accent); background: var(--accent-dim); }
+.stepper .cc-inf.active { background: var(--accent-dim); color: var(--accent); }
 
-/* ∞ 无上限切换 */
-.pill-toggle {
-  border: 1px solid var(--panel-border); background: rgba(0,0,0,0.18); color: var(--text-3);
-  font-size: 12px; font-weight: 600; cursor: pointer; padding: 5px 10px; border-radius: 9px;
-  transition: all 0.15s;
+/* 开关（跑完关机） */
+.switch { display: inline-flex; cursor: pointer; align-self: flex-start; padding: 3px 0; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-track {
+  width: 40px; height: 22px; border-radius: 12px; background: rgba(255,255,255,0.1);
+  border: 1px solid var(--panel-border); position: relative; transition: background 0.2s, border-color 0.2s;
 }
-.pill-toggle:hover { color: var(--text); border-color: rgba(255,255,255,0.2); }
-.pill-toggle.active { background: var(--accent-dim); border-color: rgba(108,140,255,0.55); color: var(--accent); }
+.switch-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #9aa3b5; transition: transform 0.2s, background 0.2s;
+}
+.switch input:checked + .switch-track { background: var(--accent-dim); border-color: rgba(108,140,255,0.55); }
+.switch input:checked + .switch-track::after { transform: translateX(18px); background: var(--accent); }
+.switch input:focus-visible + .switch-track { outline: 2px solid rgba(108,140,255,0.5); outline-offset: 2px; }
+
+/* 动作组：与其他控件基线对齐 */
+.ctrl.actions { justify-content: flex-end; }
+.ctrl.actions .ctrl-label { visibility: hidden; }
+.actions-row { display: flex; gap: 10px; align-items: center; }
 
 .bar { width: 190px; height: 6px; border-radius: 4px; background: rgba(255,255,255,0.08); overflow: hidden; }
 .bar-fill { height: 100%; width: 0%; border-radius: 4px; background: var(--accent); transition: width 0.4s, background 0.3s; }
@@ -236,8 +259,20 @@ main {
 .guide a:hover { text-decoration: underline; }
 
 /* ---------- worker 卡片网格 ---------- */
-.worker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+/* 并发面板撑满视口，卡片多时内部滚动 */
+#workerPanel { flex: 1; min-height: 220px; display: flex; flex-direction: column; }
+.worker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; flex: 1; min-height: 0; overflow-y: auto; align-content: start; }
 .empty-hint { color: var(--text-3); font-size: 12.5px; padding: 14px 4px; text-align: center; grid-column: 1 / -1; }
+
+/* 空状态：垂直水平居中 + 行动引导 */
+.empty-state {
+  grid-column: 1 / -1; align-self: stretch;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 48px 20px; text-align: center; color: var(--text-3);
+}
+.empty-icon { font-size: 34px; opacity: 0.85; line-height: 1; }
+.empty-title { font-size: 14px; font-weight: 600; color: var(--text-2); }
+.empty-sub { font-size: 12.5px; line-height: 1.8; }
 
 .worker {
   position: relative;
@@ -291,9 +326,11 @@ main {
 .tabs button:hover { color: var(--text); }
 .tabs button.active { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
 
+/* 账号库面板撑满视口，列表内部滚动 */
+#acctPanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .account-list {
   display: flex; flex-direction: column; gap: 4px;
-  max-height: calc(100vh - 300px); min-height: 200px; overflow-y: auto;
+  flex: 1; min-height: 200px; overflow-y: auto;
 }
 .acct-empty { color: #6b7a8d; font-size: 12.5px; padding: 24px 2px; text-align: center; }
 .acct-row {
