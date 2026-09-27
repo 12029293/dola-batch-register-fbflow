@@ -1,0 +1,12 @@
+{
+  "provider": "iplist",
+  "tunnelViaClash": true,
+  "extractUrl": "http://usapi.udealproxy.com:7777/iplist?custom=YOUR_CUSTOM&password=YOUR_PASSWORD&num=1&re_type=1&lb=1&region=hk&st=hongkong",
+  "googleProxy": "http://127.0.0.1:7897",
+  "region": "HK",
+  "nexipFallback": {
+    "username": "YOUR_NEXIP_USER",
+    "password": "YOUR_NEXIP_PASS",
+    "extractUrl": "https://api.nexip.net/api/external/traffic/extract?hostFormat=5&username=YOUR_NEXIP_USER&password=YOUR_NEXIP_PASS&hostPort=us.nexip.cc%3A3010&region=HK&num=1&sessionType=random-ip&state=ALL&city=ALL"
+  }
+}

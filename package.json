@@ -1,0 +1,19 @@
+{
+  "name": "doubao-manager",
+  "version": "1.0.0",
+  "description": "豆包 / Dola 指纹浏览器环境管理器",
+  "main": "main/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "Yingce",
+  "license": "MIT",
+  "dependencies": {
+    "https-proxy-agent": "^7.0.6",
+    "playwright": "^1.49.1",
+    "socks-proxy-agent": "^8.0.5"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}
