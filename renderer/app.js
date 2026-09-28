@@ -94,6 +94,8 @@ async function refreshConfig() {
   $('#setGoogleProxy').textContent = state.config.proxy.googleProxy || '未配置';
   const headlessChk = $('#setHeadless');
   if (headlessChk) headlessChk.checked = Boolean(state.config.headless);
+  const keepOpenChk = $('#setKeepOpen');
+  if (keepOpenChk) keepOpenChk.checked = Boolean(state.config.keepOpenAfterRegister);
   renderPool(state.config.accountStats);
   if (state.config.batchRunning) setRunningUi(true);
   renderGuide();
@@ -562,6 +564,14 @@ function wireSettings() {
       refreshConfig();
     });
   }
+  const keepOpenChk = $('#setKeepOpen');
+  if (keepOpenChk) {
+    keepOpenChk.addEventListener('change', async () => {
+      await window.api.invoke('config:save', { keepOpenAfterRegister: keepOpenChk.checked });
+      toast(keepOpenChk.checked ? '注册完成后将保留浏览器窗口（已自动关闭隐身注册）' : '注册完成后将关闭浏览器窗口');
+      refreshConfig();
+    });
+  }
   $('#btnRerunWizard').addEventListener('click', () => {
     closeSettings();
     openWizard();
@@ -578,7 +588,7 @@ function wire() {
     const box = $('#chainResult');
     btn.disabled = true;
     box.classList.remove('hidden');
-    box.innerHTML = '<div class="chain-line">⏳ 正在体检（约 5~20 秒，消耗 1 次提取额度）…</div>';
+    box.innerHTML = '<div class="chain-line">⏳ 正在体检（约 5~20 秒）…</div>';
     try {
       const r = await window.api.invoke('chain:check');
       box.innerHTML = r.steps
@@ -586,7 +596,7 @@ function wire() {
         .join('');
       if (r.usage) renderBudget(r.usage.used, r.usage.max);
       const allOk = r.ok && !r.steps.some((s) => s.warn);
-      toast(allOk ? '链路体检通过，可以开始批量' : (r.ok ? '链路通但出口非 HK，建议再体检一次换 IP' : '链路体检未通过，详见上方'), allOk ? 'ok' : 'warn');
+      toast(allOk ? '链路体检通过，可以开始批量' : (r.ok ? '链路通但出口非期望地区，建议再体检一次换 IP' : '链路体检未通过，详见上方'), allOk ? 'ok' : 'warn');
     } catch (e) {
       box.innerHTML = `<div class="chain-line err">❌ ${String(e.message || e)}</div>`;
     } finally {

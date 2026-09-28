@@ -164,6 +164,10 @@
           <input type="checkbox" id="setHeadless" />
           <label title="开启后批量注册在后台隐身运行，不弹浏览器窗口；注册结果和 Cookie 照常导出。若 Google 风控拦截率变高可关闭">隐身注册（软件内注册，不弹浏览器）</label>
         </div>
+        <div class="form-row chk">
+          <input type="checkbox" id="setKeepOpen" />
+          <label title="批量注册成功后不关闭浏览器窗口，保留已登录页面，方便手动测试（如生成视频）。开启时每成功一个账号保留一个窗口，且会自动关闭隐身注册">注册完成保留浏览器窗口（手动测试用）</label>
+        </div>
         <div class="form-row col">
           <button class="btn-ghost sm" id="btnRerunWizard">重新运行首次向导</button>
         </div>

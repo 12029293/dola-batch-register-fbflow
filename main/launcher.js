@@ -65,6 +65,16 @@ async function launchEnv(env, profilesDir, { headless = false } = {}) {
   if (!env.fingerprint) throw new Error('该环境没有指纹数据');
   const fp = env.fingerprint;
 
+  // 时区跟随出口地区（Google 风控强信号）：IP 地理与浏览器时区矛盾（如日本 IP + 上海时区 UTC+8）
+  // 会稳定触发人机验证——2026-09-28 实测 JP 出口每次必出 Google 验证即此因。HK 与 Asia/Shanghai 同为
+  // UTC+8 无矛盾（海外华人自洽人设）；非映射地区沿用指纹池时区。指纹池只含 UTC+8（HK 时代设定），
+  // 出口 JP 时必须覆写为 Asia/Tokyo（UTC+9）。
+  // 直连模式（phantom-local）：phantomExitProbe 已按出口国家算好 tz，proxy.tz 优先于 region 映射。
+  const REGION_TZ = { hk: 'Asia/Shanghai', jp: 'Asia/Tokyo', tw: 'Asia/Taipei' };
+  const exitTz = (env.proxy && env.proxy.tz)
+    || REGION_TZ[String((env.proxy && env.proxy.region) || '').toLowerCase()]
+    || null;
+
   const launchOpts = {
     // headless=true：批量注册在后台隐身跑（软件内注册，不弹浏览器窗口）
     headless,
@@ -73,7 +83,7 @@ async function launchEnv(env, profilesDir, { headless = false } = {}) {
     // 固定 en-US：Google 按 Accept-Language 决定 OAuth 页面语言，实测会出印尼语页（Lanjutkan/Batalkan），
     // 中文/英文状态机识别不了即误判换 IP；en-US 页面全被状态机覆盖。指纹注入 langs 已同步 en-US 保持一致。
     locale: 'en-US',
-    timezoneId: fp.timezoneId || 'Asia/Shanghai',
+    timezoneId: exitTz || fp.timezoneId || 'Asia/Shanghai',
     args: [
       '--disable-blink-features=AutomationControlled',
       // WebRTC 防泄漏：挂代理时禁止非代理 UDP，防止真实 IP 从 WebRTC 泄漏
@@ -87,22 +97,29 @@ async function launchEnv(env, profilesDir, { headless = false } = {}) {
 
   let forwarderRef = null;
   if (env.proxy && env.proxy.host) {
-    // 本地认证转发器（双上游分流）：浏览器挂免认证的 127.0.0.1 端口，本模块代发认证。
-    // Google 系域名 → 分流线路（config.googleProxy，如 Clash）；其余 → 出口隧道；Clash 拨号失败自动回隧道兜底。
-    // 链式中转（via）：提取结果自带 via 时优先，否则按 config（provider=iplist / tunnelViaClash）启用；
-    // 带 via 时所有对隧道的拨号（含 Google 兜底）均经 Clash 中转。
-    const fw = await startForwarder({
-      upstream: {
-        host: env.proxy.host,
-        port: env.proxy.port,
-        username: env.proxy.username || '',
-        password: env.proxy.password || '',
-        via: env.proxy.via || loadTunnelVia() || undefined,
-      },
-      googleUpstream: loadGoogleUpstream(),
-    });
-    forwarderRef = fw;
-    launchOpts.proxy = { server: `http://127.0.0.1:${fw.port}` };
+    if (env.proxy.noAuth) {
+      // 直连模式（Phantom 本地混合端口，无认证，HTTP/SOCKS 双协议）：浏览器直接挂代理，
+      // 不启本地认证转发器（无需代发认证，也无 Google 分流需求）。
+      const scheme = env.proxy.protocol === 'socks5' ? 'socks5' : 'http';
+      launchOpts.proxy = { server: `${scheme}://${env.proxy.host}:${env.proxy.port}` };
+    } else {
+      // 本地认证转发器（双上游分流）：浏览器挂免认证的 127.0.0.1 端口，本模块代发认证。
+      // Google 系域名 → 分流线路（config.googleProxy，如 Clash）；其余 → 出口隧道；Clash 拨号失败自动回隧道兜底。
+      // 链式中转（via）：提取结果自带 via 时优先，否则按 config（provider=iplist / tunnelViaClash）启用；
+      // 带 via 时所有对隧道的拨号（含 Google 兜底）均经 Clash 中转。
+      const fw = await startForwarder({
+        upstream: {
+          host: env.proxy.host,
+          port: env.proxy.port,
+          username: env.proxy.username || '',
+          password: env.proxy.password || '',
+          via: env.proxy.via || loadTunnelVia() || undefined,
+        },
+        googleUpstream: loadGoogleUpstream(),
+      });
+      forwarderRef = fw;
+      launchOpts.proxy = { server: `http://127.0.0.1:${fw.port}` };
+    }
   }
 
   const context = await chromium.launchPersistentContext(

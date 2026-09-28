@@ -1,6 +1,6 @@
 // tests/test-batch-mock.js · BatchRunner 并发调度 mock 测试（无需真实浏览器，node 直接跑）
 // 覆盖：8 并发调度正确性 / 验证码换牌 / 不可重试失败 / 预算熔断全队停止 / 停止语义 /
-//       Google 专线探活失败不启动 / 预筛抖动恢复 / 事件字段与序列
+//       Google 专线探活失败不启动 / 预筛抖动恢复 / keepOpen 成功保留窗口失败照常关窗 / keepOpen 默认关闭行为不变
 // 运行：node tests/test-batch-mock.js
 'use strict';
 
@@ -49,11 +49,13 @@ function makeFakeLauncher() {
 function makeFakeRegisterer(scripts = {}, { registerMs = 15 } = {}) {
   const captchaSeen = new Set();
   let concurrent = 0;
-  const stat = { maxConcurrent: 0, calls: 0 };
+  const stat = { maxConcurrent: 0, calls: 0, keepOpenSeen: [] };
   return {
     stat,
-    registerDola: async ({ account }) => {
+    registerDola: async (opts) => {
+      const { account } = opts;
       stat.calls += 1;
+      stat.keepOpenSeen.push(Boolean(opts.keepOpen)); // 记录 keepOpen 透传值（回归用）
       concurrent += 1;
       stat.maxConcurrent = Math.max(stat.maxConcurrent, concurrent);
       const mode = scripts[account.email] || 'ok';
@@ -113,7 +115,7 @@ function makeFakeProxyService({ screenFailFirst = 0 } = {}) {
 
 const fakeExport = async () => ({ count: 6, lsCount: 4, missingCore: [] });
 
-function makeRunner({ accountCount = 12, concurrency = 8, scripts = {}, proxyOpts = {}, maxExtractBudget = 0, registerMs = 15 } = {}) {
+function makeRunner({ accountCount = 12, concurrency = 8, scripts = {}, proxyOpts = {}, maxExtractBudget = 0, registerMs = 15, keepOpenAfterRegister = false } = {}) {
   const dir = tmpDir();
   const store = new EnvStore(dir);
   const accountStore = new AccountStore(dir);
@@ -132,6 +134,7 @@ function makeRunner({ accountCount = 12, concurrency = 8, scripts = {}, proxyOpt
     exportCookies: fakeExport,
     emit: (event, payload) => events.push({ event, payload, t: Date.now() }),
     concurrency,
+    keepOpenAfterRegister,
     region: 'HK',
     googleProxy: 'http://127.0.0.1:7897',
     maxExtractBudget,
@@ -313,6 +316,53 @@ async function testScreenFailRecover() {
   console.log('✅ test6 预筛失败重试恢复 通过');
 }
 
+// 测试 7：keepOpen=true——成功账号保留浏览器窗口（批量结束不再强制清空），失败账号仍关窗删环境
+async function testKeepOpenKeepsSuccessWindows() {
+  const ctx = makeRunner({
+    accountCount: 4,
+    concurrency: 4,
+    scripts: { 'user002@test.com': 'fail' },
+    keepOpenAfterRegister: true,
+    registerMs: 10,
+  });
+  await ctx.runner.start();
+  const done = findDone(ctx.events);
+  const okEmails = new Set(done.payload.ok.map((x) => x.email));
+  assert.strictEqual(done.payload.ok.length, 3, '3 个成功');
+  assert.strictEqual(done.payload.fail.length, 1, '1 个失败');
+  // keepOpen 逐号透传到 registerDola
+  assert.strictEqual(ctx.registerer.stat.keepOpenSeen.length, 4, 'registerDola 被调用 4 次');
+  assert(ctx.registerer.stat.keepOpenSeen.every(Boolean), '每次调用都收到 keepOpen=true');
+  // 批量结束后：成功窗口保留（不再强制清空），失败窗口已关
+  assert.strictEqual(ctx.launcher._running.size, 3, `批量结束保留 3 个成功窗口（实际 ${ctx.launcher._running.size}）`);
+  // 失败账号：状态 failed、环境已删除、窗口不保留
+  const acc = new Map(ctx.accountStore.list().map((a) => [a.email, a.status]));
+  assert.strictEqual(acc.get('user002@test.com'), 'failed', '失败账号状态 failed');
+  assert.strictEqual(ctx.store.list().length, 3, '失败环境已删除，成功环境保留');
+  // 成功卡片 step 带保留提示；失败卡片不带
+  const lastByEmail = new Map();
+  for (const e of ctx.events) {
+    if (e.event !== 'batch:account') continue;
+    lastByEmail.set(e.payload.email, e.payload);
+  }
+  for (const [email, rec] of lastByEmail) {
+    if (okEmails.has(email)) assert(/浏览器窗口已保留/.test(rec.step), `${email} 成功 step 带保留窗口提示`);
+    else assert(!/浏览器窗口已保留/.test(rec.step), `${email} 失败 step 不带保留提示`);
+  }
+  console.log('✅ test7 keepOpen 成功保留窗口/失败照常关窗 通过');
+}
+
+// 测试 8：keepOpen=false（默认）——与旧版行为完全一致，批量结束浏览器全部关闭
+async function testKeepOpenDefaultClosed() {
+  const ctx = makeRunner({ accountCount: 3, concurrency: 3, keepOpenAfterRegister: false, registerMs: 10 });
+  await ctx.runner.start();
+  const done = findDone(ctx.events);
+  assert.strictEqual(done.payload.ok.length, 3, '3 个成功');
+  assert.strictEqual(ctx.launcher._running.size, 0, '默认关闭时批量结束浏览器全部关闭（旧行为）');
+  assert(ctx.registerer.stat.keepOpenSeen.every((v) => v === false), '每次调用都收到 keepOpen=false');
+  console.log('✅ test8 keepOpen 默认关闭行为不变 通过');
+}
+
 (async () => {
   await testAllSuccess();
   await testBudgetNotOverridden();
@@ -321,6 +371,8 @@ async function testScreenFailRecover() {
   await testStopSemantics();
   await testGoogleLineAbort();
   await testScreenFailRecover();
+  await testKeepOpenKeepsSuccessWindows();
+  await testKeepOpenDefaultClosed();
   console.log('\n全部 mock 测试通过 ✔');
   process.exit(0);
 })().catch((e) => {

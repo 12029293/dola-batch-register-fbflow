@@ -289,11 +289,34 @@ function tunnelViaFromConfig(config) {
 }
 
 // 提取粘性会话代理：从提取 API 拿网关入口，然后把用户名改写为 {user}-{region}-sid-{sid}
-// 实测（2026-09）：-sid- 后缀固定出口 IP（住宅 ISP），换 sid 即换 IP；region 后缀选地区（默认 HK，无 any 降级——
-// 业务要求注册链路只允许 HK 出口，HK 探活/归属地校验失败一律换 sid 重试，绝不静默换区）
+// 实测（2026-09）：-sid- 后缀固定出口 IP（住宅 ISP），换 sid 即换 IP；region 后缀选地区（取配置地区，无 any 降级——
+// 业务要求注册链路只允许配置地区出口，探活/归属地校验失败一律换 sid 重试，绝不静默换区）
 // provider=iplist（如 udealproxy）：白名单认证免账密，region 由提取 URL 自带，每次提取即新出口。
 async function extractStickyProxy(config, { region = 'HK', sid = null } = {}) {
-  if (!config || !config.extractUrl) throw new Error('未配置代理提取 API（config/proxy.json）');
+  if (!config) throw new Error('未配置代理（config/proxy.json）');
+  // 网关模式（udealproxy jp_tokyo 等）：固定网关入口 + 账密认证，用户名内嵌 session 控制出口——
+  // 实测（2026-09-27）：jp 地区 iplist 白名单节点 CONNECT 611（该地区不支持免认证提取），必须走账密网关。
+  // 不调提取 API（0 提取配额、不触发预算熔断），换 sid 即换出口；隧道仍按 tunnelViaClash 经 Clash 中转。
+  if (config.gateway && config.gateway.host) {
+    const useSid = sid || randomSid();
+    const tpl = String(config.gateway.usernameTemplate || '');
+    const username = tpl.replace('{sid}', useSid);
+    if (!username || username === tpl) throw new Error('gateway.usernameTemplate 缺失或不含 {sid} 占位符');
+    const result = {
+      protocol: config.protocol || 'http',
+      host: config.gateway.host,
+      port: Number(config.gateway.port) || 6666,
+      username,
+      password: config.gateway.password || '',
+      region: String(region || 'HK').toLowerCase(),
+      sid: useSid,
+      extractedAt: new Date().toISOString(),
+    };
+    const gvia = tunnelViaFromConfig(config);
+    if (gvia) result.via = gvia;
+    return result;
+  }
+  if (!config.extractUrl) throw new Error('未配置代理提取 API（config/proxy.json）');
   if (config.extractBudget) setExtractBudget(config.extractBudget);
   consumeExtract();
   const { text, status } = await httpGetText(config.extractUrl);
@@ -395,7 +418,7 @@ async function testProxy(proxy) {
 }
 
 // Dola 出口可达性探测：经出口访问 Dola 首页，收到任意服务器响应（<500）即认为线路可达。
-// 分流版预筛用：HK 出口只验「归属地 + Dola 可达」，Google 可达性不看出口（Google 走分流线路）。
+// 分流版预筛用：出口只验「归属地 + Dola 可达」，Google 可达性不看出口（Google 走分流线路）。
 async function probeDolaExit(proxy, { timeoutMs = 25000 } = {}) {
   if (!proxy || !proxy.host) throw new Error('无代理可探测');
   let status;
@@ -440,17 +463,22 @@ async function probeGoogleExit(proxy, { timeoutMs = 20000 } = {}) {
   return { ok: true, probedAt: new Date().toISOString() };
 }
 
-// HK 出口归属地校验：出口必须落在香港（HK 节点实测出口含香港 Pccw 等住宅 ISP）
-const HK_EXIT_RE = /香港|hong ?kong/i;
+// 出口归属地校验：出口必须落在配置地区（按实测出口归属文案匹配，非配置地区一律换 sid/重提取重试）。
+// 各地区正则按服务商实测出口归属文案维护：HK 节点实测含 香港 Pccw 等住宅 ISP；udealproxy jp_tokyo 节点实测出口文案含 日本/Tokyo
+const REGION_EXIT_RE = {
+  hk: /香港|hong ?kong/i,
+  jp: /日本|东京|japan|tokyo/i,
+};
+const HK_EXIT_RE = REGION_EXIT_RE.hk; // 兼容旧导出名（外部引用/测试依赖），新代码请改用 REGION_EXIT_RE
 
 // 组合预筛（分流版）：提取粘性会话 → 出口 IP 检测 → 归属地校验 → Dola 可达性。
 // Google 可达性：传入 googleProxy（分流线路）时，先单独探一次分流线路（每账号一次，不随 sid 循环，
 // 不消耗提取预算），出口侧不再做 Google 探测——避免 nexip→Google 网关级 RESET 误杀健康出口、空烧预算。
-// 强制 HK：region=hk（默认）且未显式传 requireRegion 时自动启用 HK 归属地校验，不做 any 降级。
+// 强制归属地：未显式传 requireRegion 时按 region 从 REGION_EXIT_RE 自动启用对应归属地校验（无正则的地区不做校验），不做 any 降级。
 // 任一出口环节失败自动换 sid 重筛；全程受提取预算保护（预算耗尽抛 BUDGET_EXHAUSTED 向上传播）。
 async function screenStickyExit(config, { region = 'HK', requireRegion = null, maxAttempts = 4, googleProxy = null, onAttempt = () => {} } = {}) {
   const reg = String(region || 'HK').toLowerCase();
-  const geoRe = requireRegion instanceof RegExp ? requireRegion : (reg === 'hk' ? HK_EXIT_RE : null);
+  const geoRe = requireRegion instanceof RegExp ? requireRegion : (REGION_EXIT_RE[reg] || null);
 
   // ① Google 分流线路预筛（每账号一次，独立于出口 sid 循环）
   let googleLine = null;
@@ -486,4 +514,98 @@ async function screenStickyExit(config, { region = 'HK', requireRegion = null, m
   throw lastErr || new Error('出口预筛失败（未知原因）');
 }
 
-module.exports = { extractProxy, extractStickyProxy, randomSid, testProxy, parseProxyResponse, probeProtocol, probeGoogleExit, probeGoogleLine, probeDolaExit, parseGoogleProxy, tunnelViaFromConfig, screenStickyExit, setExtractBudget, getExtractUsage, resetExtractBudget, HK_EXIT_RE, httpGetViaChain };
+// ---------- Phantom 本地混合端口直连模式（mode=phantom-local） ----------
+
+// 纯函数：ip-api 出口信息 → 时区/地区归类（可离线单测）。
+// HK → Asia/Shanghai；TW → Asia/Taipei；其他 → Asia/Shanghai + warn「出口非港台：XX」。
+function classifyExitRegion(info) {
+  const raw = info || {};
+  const name = String(raw.country || '').trim();
+  const cc = String(raw.countryCode || '').trim().toUpperCase();
+  // countryCode 缺失时按国家名兜底推断（中文/英文/域名后缀）
+  const code = /^[A-Z]{2}$/.test(cc) ? cc
+    : (/香港|hong ?kong/i.test(name) ? 'HK'
+      : (/台湾|台灣|taiwan/i.test(name) ? 'TW' : ''));
+  const base = {
+    ok: true,
+    ip: String(raw.query || raw.ip || ''),
+    country: name || code || '未知',
+    countryCode: code || cc || '',
+    regionName: String(raw.regionName || raw.region || ''),
+    city: String(raw.city || ''),
+    isp: String(raw.isp || ''),
+  };
+  if (code === 'HK') return { ...base, region: 'hk', tz: 'Asia/Shanghai', warn: '' };
+  if (code === 'TW') return { ...base, region: 'tw', tz: 'Asia/Taipei', warn: '' };
+  return { ...base, region: (code || 'xx').toLowerCase(), tz: 'Asia/Shanghai', warn: `出口非港台：${base.country}` };
+}
+
+// 经无认证 HTTP 代理请求 http 目标：绝对路径形式（GET http://host/path），无需 CONNECT 隧道
+function httpGetViaHttpProxy(proxyHost, proxyPort, targetUrl, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (err, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      if (err) reject(err); else resolve(result);
+    };
+    const target = new URL(targetUrl);
+    const req = http.request({
+      host: proxyHost,
+      port: proxyPort,
+      method: 'GET',
+      path: targetUrl, // 绝对形式：HTTP 代理据此转发
+      headers: { Host: target.host, 'User-Agent': UA, Accept: '*/*', Connection: 'close' },
+      timeout: timeoutMs,
+    }, (res) => {
+      let text = '';
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => settle(null, { status: res.statusCode, text }));
+    });
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      settle(new Error(`探测请求硬超时（${timeoutMs}ms）`));
+    }, timeoutMs + 5000);
+    req.on('timeout', () => req.destroy(new Error('探测请求超时')));
+    req.on('error', (e) => settle(e));
+    req.end();
+  });
+}
+
+// Phantom 出口探测（直连模式轻量预筛，替代 screenStickyExit 的提取预筛）：
+// 经本地混合端口（无认证）请求 ip-api 拿出口国家 → classifyExitRegion 归类时区。
+// 两层形式各试 2 轮：① HTTP 绝对路径形式（ip-api 免费版仅 http）② HTTPS CONNECT 兜底。
+// 全部失败抛 SLOW_NETWORK（调用方按「同出口换指纹重试」语义处理）。
+async function phantomExitProbe(browserProxy, { timeoutMs = 12000, onAttempt = () => {} } = {}) {
+  const host = String((browserProxy && browserProxy.host) || '127.0.0.1');
+  const port = Number((browserProxy && browserProxy.port) || 7897);
+  const query = 'fields=status,message,country,countryCode,regionName,city,isp,timezone,query';
+  let lastErr = null;
+  const parseAndClassify = (text) => {
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error(`ip-api 响应非 JSON（${String(text).slice(0, 40)}）`); }
+    if (!j || j.status !== 'success') throw new Error(`ip-api 返回失败（${String((j && j.message) || 'unknown').slice(0, 60)}）`);
+    return classifyExitRegion(j);
+  };
+  for (let i = 1; i <= 2; i += 1) {
+    // ① HTTP 绝对路径形式（phantom 混合端口 HTTP 模式）
+    try {
+      onAttempt(`探测出口 IP（第 ${i}/2 轮 · HTTP 代理形式）…`);
+      const res = await httpGetViaHttpProxy(host, port, `http://ip-api.com/json/?${query}`, timeoutMs);
+      return parseAndClassify(res.text);
+    } catch (e) { lastErr = e; }
+    // ② HTTPS CONNECT 兜底（phantom 走 SOCKS 场景由 agent 兼容）
+    try {
+      onAttempt(`探测出口 IP（第 ${i}/2 轮 · CONNECT 形式）…`);
+      const agent = new HttpsProxyAgent({ host, port });
+      const res = await httpGetText(`https://ip-api.com/json/?${query}`, { agent, timeoutMs });
+      return parseAndClassify(res.text);
+    } catch (e) { lastErr = e; }
+  }
+  const err = new Error(`Phantom 出口探测失败：${lastErr ? String(lastErr.message || lastErr).slice(0, 90) : '未知错误'}`);
+  err.code = 'SLOW_NETWORK';
+  throw err;
+}
+
+module.exports = { extractProxy, extractStickyProxy, randomSid, testProxy, parseProxyResponse, probeProtocol, probeGoogleExit, probeGoogleLine, probeDolaExit, parseGoogleProxy, tunnelViaFromConfig, screenStickyExit, setExtractBudget, getExtractUsage, resetExtractBudget, REGION_EXIT_RE, HK_EXIT_RE, httpGetViaChain, classifyExitRegion, phantomExitProbe, httpGetViaHttpProxy };

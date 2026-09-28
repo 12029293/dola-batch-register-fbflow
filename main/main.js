@@ -24,7 +24,11 @@ let proxyConfig = { protocol: 'socks5', extractUrl: '' };
 function appConfigFile() {
   return path.join(app.getAppPath(), 'config', 'app.json');
 }
-const appConfig = { concurrency: 8, exportDir: '', maxExtractBudget: 0, headless: true };
+const appConfig = {
+  concurrency: 8, exportDir: '', maxExtractBudget: 0, headless: true, keepOpenAfterRegister: false,
+  // Facebook 账号（FB 登录 → 绑定谷歌 → 解绑 FB 流程）：由 config/app.json 持久化
+  facebook: { email: '', password: '' },
+};
 
 function normalizeAppConfig() {
   // 并发数：-1=无上限（每个待注册账号一个 worker）；1~999 有限并发
@@ -37,6 +41,13 @@ function normalizeAppConfig() {
   if (appConfig.maxExtractBudget > 0 && appConfig.maxExtractBudget < 1) appConfig.maxExtractBudget = 0;
   // 隐身注册（headless）：默认开启 = 软件内注册不弹浏览器窗口；显式 false 才关闭
   appConfig.headless = appConfig.headless !== false && appConfig.headless !== 'false';
+  // 注册成功保留浏览器窗口：默认关闭；开启时必须可见窗口（与隐身注册互斥——隐身下看不到保留的窗口）
+  appConfig.keepOpenAfterRegister = appConfig.keepOpenAfterRegister === true;
+  if (appConfig.keepOpenAfterRegister) appConfig.headless = false;
+  // Facebook 账号：保证对象形状（email/password 均为字符串）
+  if (!appConfig.facebook || typeof appConfig.facebook !== 'object') appConfig.facebook = { email: '', password: '' };
+  appConfig.facebook.email = String(appConfig.facebook.email || '').trim();
+  appConfig.facebook.password = String(appConfig.facebook.password || '');
 }
 
 function saveAppConfig() {
@@ -58,8 +69,14 @@ function loadProxyConfig() {
   try {
     const file = path.join(app.getAppPath(), 'config', 'proxy.json');
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (parsed && parsed.extractUrl) proxyConfig = parsed;
+    // 两种配置形态均采纳：传统提取网关（extractUrl）/ 直连模式（mode=clash-local，兼容旧值 phantom-local）
+    if (parsed && (parsed.extractUrl || parsed.mode)) proxyConfig = parsed;
   } catch (e) { /* 用默认空配置 */ }
+}
+
+// 直连模式判定：本地代理端口直挂（Clash Verge 7897 / Phantom 65533；不提取、不预筛、不耗预算）
+function isPhantomLocalMode() {
+  return Boolean(proxyConfig && /^(clash|phantom)-local$/.test(String(proxyConfig.mode || '')));
 }
 
 // 保存提取 API URL 到 proxy.json（保留其余字段；密钥只落盘，不回传渲染层）
@@ -141,8 +158,11 @@ function registerIpc() {
     exportDirDefault: defaultExportDir(),
     maxExtractBudget: appConfig.maxExtractBudget,
     headless: appConfig.headless,
+    keepOpenAfterRegister: appConfig.keepOpenAfterRegister,
+    facebookConfigured: Boolean(appConfig.facebook && appConfig.facebook.email && appConfig.facebook.password),
     proxy: {
-      configured: Boolean(proxyConfig.extractUrl),
+      configured: Boolean(proxyConfig.extractUrl) || isPhantomLocalMode(),
+      mode: isPhantomLocalMode() ? String(proxyConfig.mode) : 'gateway',
       extractUrlMasked: maskExtractUrl(proxyConfig.extractUrl),
       googleProxy: proxyConfig.googleProxy || '',
       region: proxyConfig.region || 'HK',
@@ -167,6 +187,9 @@ function registerIpc() {
       appConfig.maxExtractBudget = !Number.isFinite(mb) ? 0 : (mb < 0 ? -1 : Math.floor(mb));
     }
     if (patch.headless !== undefined) appConfig.headless = Boolean(patch.headless);
+    if (patch.keepOpenAfterRegister !== undefined) appConfig.keepOpenAfterRegister = Boolean(patch.keepOpenAfterRegister);
+    // 联动互斥：开隐身自动关保留窗口（隐身模式看不到保留的窗口）
+    if (patch.headless === true) appConfig.keepOpenAfterRegister = false;
     normalizeAppConfig();
     saveAppConfig();
     if (patch.extractUrl !== undefined && String(patch.extractUrl).trim() !== '') {
@@ -179,7 +202,8 @@ function registerIpc() {
   // 首次判定：未配置提取 API 或账号池为空（DBK_FORCE_SETUP=1 可强制弹出，用于演示/回归）
   ipcMain.handle('setup:status', () => {
     const stats = accountStats();
-    const hasExtractUrl = Boolean(proxyConfig.extractUrl);
+    // 直连模式（Phantom 本地端口）无需提取 API：视为已配置，不再强制走向导
+    const hasExtractUrl = Boolean(proxyConfig.extractUrl) || isPhantomLocalMode();
     const hasAccounts = stats.total > 0;
     return {
       needSetup: (!hasExtractUrl || !hasAccounts) || process.env.DBK_FORCE_SETUP === '1',
@@ -251,6 +275,12 @@ function registerIpc() {
   // Clash 挂了直接短路返回，不浪费提取额度。用于开始批量前预检，避免整批撞进故障窗口）
   ipcMain.handle('chain:check', async () => {
     const steps = [];
+    // 直连模式（Phantom 本地端口）：无提取/分流链路，浏览器启动时由 batchRunner 做出口探测即可
+    if (isPhantomLocalMode()) {
+      const bp = proxyConfig.browserProxy || {};
+      steps.push({ ok: true, text: `直连模式（Phantom 本地混合端口 ${bp.host || '127.0.0.1'}:${bp.port || 65533}），无提取/分流链路` });
+      return { ok: true, hk: true, direct: true, steps, usage: proxyService.getExtractUsage() };
+    }
     // ① Clash 线路（0 提取）
     try {
       const g = await proxyService.probeGoogleLine(proxyConfig.googleProxy);
@@ -267,12 +297,17 @@ function registerIpc() {
     try {
       const cand = await proxyService.extractStickyProxy(proxyConfig, { region: proxyConfig.region || 'HK' });
       const t = await proxyService.testProxy(cand);
-      const isHk = proxyService.HK_EXIT_RE.test(`${t.country}${t.region}${t.city}`);
-      steps.push({ ok: true, warn: !isHk, text: `隧道 CONNECT 通过，出口 ${t.ip}（${t.country} ${t.city} · ${t.isp}）${isHk ? '' : ' ⚠️ 非 HK，重跑一次体检换 IP'}` });
+      // 归属地校验按配置地区动态取正则（与 screenStickyExit 同源 REGION_EXIT_RE）：无正则的地区不判归属 warn
+      const regKey = String(proxyConfig.region || 'HK').toLowerCase();
+      const geoRe = proxyService.REGION_EXIT_RE[regKey] || null;
+      const isExpectedRegion = geoRe ? geoRe.test(`${t.country}${t.region}${t.city}`) : null; // null=该地区无校验正则，不判 warn
+      const geoWarn = isExpectedRegion === false ? ` ⚠️ 出口非期望地区（期望 ${regKey.toUpperCase()}，实际 ${t.country} ${t.region}），重跑一次体检换 IP` : '';
+      steps.push({ ok: true, warn: isExpectedRegion === false, text: `隧道 CONNECT 通过，出口 ${t.ip}（${t.country} ${t.city} · ${t.isp}）${geoWarn}` });
       // ③ 该出口访问 Dola
       const dola = await proxyService.probeDolaExit(cand);
       steps.push({ ok: true, text: `Dola 可达（HTTP ${dola.status}）` });
-      return { ok: true, hk: isHk, exit: { ip: t.ip, country: t.country, city: t.city, isp: t.isp }, dola: dola.status, steps, usage: proxyService.getExtractUsage() };
+      // hk 字段为历史命名（渲染层未直接使用），语义=出口归属符合配置地区，保留字段名兼容外部调用
+      return { ok: true, hk: isExpectedRegion !== false, exit: { ip: t.ip, country: t.country, city: t.city, isp: t.isp }, dola: dola.status, steps, usage: proxyService.getExtractUsage() };
     } catch (err) {
       steps.push({ ok: false, text: `隧道/出口失败：${String(err.message || err).slice(0, 160)}` });
       return { ok: false, steps, usage: proxyService.getExtractUsage() };
@@ -448,6 +483,9 @@ function registerIpc() {
     let n = Math.floor(Number(concurrency));
     if (!Number.isFinite(n)) n = appConfig.concurrency || 8;
     n = n < 0 ? -1 : Math.min(999, Math.max(1, n));
+    // FB 流程（直连模式）：fbAccount 透传给 BatchRunner → registerDolaViaFacebook
+    const directMode = isPhantomLocalMode();
+    const fb = appConfig.facebook;
     batchRunner = new BatchRunner({
       store,
       accountStore,
@@ -460,9 +498,12 @@ function registerIpc() {
       concurrency: n,
       maxCount: Math.max(0, Math.floor(Number(maxCount) || 0)),
       headless: appConfig.headless,
+      keepOpenAfterRegister: appConfig.keepOpenAfterRegister,
       region: proxyConfig.region || 'HK',
-      googleProxy: proxyService.parseGoogleProxy(proxyConfig.googleProxy),
+      // 直连模式无分流线路：不传 googleProxy（跳过探活）
+      googleProxy: directMode ? null : proxyService.parseGoogleProxy(proxyConfig.googleProxy),
       maxExtractBudget: appConfig.maxExtractBudget,
+      fbAccount: (fb && fb.email && fb.password) ? { email: fb.email, password: fb.password } : null,
     });
     batchRunner.start().then(() => {
       // 夜间挂机：整批正常跑完（非手动停止）后 60 秒自动关机；取消用 shutdown /a

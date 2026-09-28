@@ -13,7 +13,7 @@ const { randomFingerprint } = require('./fingerprint');
 
 const MAX_IP = 3;            // 单号最多换 3 轮出口（与旧 runBatch 一致）
 const STATS_INTERVAL = 2000; // 统计节流推送间隔（ms）
-const HK_STREAK_ALERT = 6;   // HK 预筛连续失败告警阈值
+const HK_STREAK_ALERT = 6;   // 出口预筛连续失败告警阈值（常量名 HK 为历史命名，不改）
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -31,9 +31,11 @@ class BatchRunner {
    * @param {number} [opts.concurrency]   并发 worker 数（-1=无上限：按待注册数开 worker；1~999 有限）
    * @param {number} [opts.maxCount]      本轮最多处理账号数（0=全部，断点续跑/限量挂机用）
    * @param {boolean} [opts.headless]     隐身注册：浏览器后台运行不弹窗（默认 true = 软件内注册）
+   * @param {boolean} [opts.keepOpenAfterRegister] 注册成功后保留浏览器窗口（手动测试用；失败账号仍关窗删环境，与隐身注册互斥）
    * @param {string} [opts.region]        出口地区（默认 HK，无降级）
    * @param {string|null} [opts.googleProxy] Google 分流线路（批量开始探活一次）
    * @param {number} [opts.maxExtractBudget] 提取预算上限（0=自动 10×待注册数+20）
+   * @param {object|null} [opts.fbAccount]  Facebook 账号 {email, password}（FB 登录→绑定谷歌→解绑 FB 流程）
    */
   constructor({
     store,
@@ -47,9 +49,11 @@ class BatchRunner {
     concurrency = 8,
     maxCount = 0,
     headless = true,
+    keepOpenAfterRegister = false,
     region = 'HK',
     googleProxy = null,
     maxExtractBudget = 0,
+    fbAccount = null,
   }) {
     this.store = store;
     this.accountStore = accountStore;
@@ -64,9 +68,18 @@ class BatchRunner {
     this.concurrency = !Number.isFinite(cc) ? 8 : (cc < 0 ? -1 : Math.min(999, Math.max(1, cc)));
     this.maxCount = Math.max(0, Math.floor(Number(maxCount) || 0)); // 0=全部
     this.headless = headless !== false;
+    // 注册成功保留浏览器窗口（手动测试用）：只有显式 true 才开启；失败账号收尾路径不受影响
+    this.keepOpen = keepOpenAfterRegister === true;
     this.region = String(region || 'HK');
     this.googleProxy = googleProxy || null;
     this.maxExtractBudget = Number(maxExtractBudget) || 0;
+    // Facebook 账号（config/app.json → facebook）：存在且代理配置为直连模式时启用新流程
+    this.fbAccount = fbAccount && fbAccount.email && fbAccount.password ? fbAccount : null;
+    // 直连模式（proxy.json → mode=clash-local，兼容旧值 phantom-local）：本地代理端口
+    // （Clash Verge 7897 / Phantom 65533），不提取不预筛不耗预算，
+    // 轻量出口探测（phantomExitProbe）替代 screenStickyExit；换 IP 逻辑退化为同出口换指纹（MAX_IP=3 不变）
+    this.directMode = Boolean(proxyConfig && /^(clash|phantom)-local$/.test(String(proxyConfig.mode || '')));
+    this.browserProxy = (proxyConfig && proxyConfig.browserProxy) || { host: '127.0.0.1', port: 7897 };
     // 关键：剔除 extractBudget，防止 extractStickyProxy 内部用 proxy.json 的静态值
     // 覆盖批量开始时设置的共享预算（实测 E2E 发现：预算条会从设定值回落到 15）
     this._screenConfig = { ...proxyConfig, extractBudget: undefined };
@@ -89,8 +102,9 @@ class BatchRunner {
     if (this.running) throw new Error('批量任务已在运行中');
     this.running = true;
     try {
-      // ① Google 分流线路探活（整批一次；失败直接不启动，省配额）
-      if (this.googleProxy) {
+      // ① Google 分流线路探活（整批一次；失败直接不启动，省配额）。
+      //    直连模式无分流线路：跳过探活。
+      if (this.googleProxy && !this.directMode) {
         try {
           await this.proxyService.probeGoogleLine(this.googleProxy);
         } catch (e) {
@@ -103,13 +117,16 @@ class BatchRunner {
         }
       }
 
-      // ② 共享提取预算：maxExtractBudget>0 取 min(10×待注册数+20, 上限)；<0 无上限；0=自动
+      // ② 共享提取预算：maxExtractBudget>0 取 min(10×待注册数+20, 上限)；<0 无上限；0=自动。
+      //    直连模式不提取代理：无预算概念，跳过（统计里的 extractUsage/extractBudget 保持默认 0）。
       const pending = this.accountStore.list().filter((a) => a.status === 'unused').length;
-      const computed = pending * 10 + 20;
-      let budget = this.maxExtractBudget > 0 ? Math.min(computed, this.maxExtractBudget) : computed;
-      if (this.maxExtractBudget < 0) budget = Infinity; // 无上限：不熔断，永不停止提取
-      this.proxyService.resetExtractBudget();
-      this.proxyService.setExtractBudget(budget);
+      if (!this.directMode) {
+        const computed = pending * 10 + 20;
+        let budget = this.maxExtractBudget > 0 ? Math.min(computed, this.maxExtractBudget) : computed;
+        if (this.maxExtractBudget < 0) budget = Infinity; // 无上限：不熔断，永不停止提取
+        this.proxyService.resetExtractBudget();
+        this.proxyService.setExtractBudget(budget);
+      }
 
       // ③ worker pool：每个 worker 独立循环领号→注册→领下一个
       //    concurrency<0 = 无上限：worker 数 = min(待注册数, 本轮限量>0 ? 限量 : 待注册数)
@@ -199,54 +216,97 @@ class BatchRunner {
             state: 'screening',
             attempt: ipTry,
             maxAttempt: MAX_IP,
-            step: `第 ${ipTry}/${MAX_IP} 轮：刷新指纹并预筛 ${this.region.toUpperCase()} 出口`,
+            step: this.directMode
+              ? `第 ${ipTry}/${MAX_IP} 轮：刷新指纹并探测 Phantom 出口`
+              : `第 ${ipTry}/${MAX_IP} 轮：刷新指纹并预筛 ${this.region.toUpperCase()} 出口`,
           });
           this.store.update(env.id, { fingerprint: randomFingerprint() });
 
-          // 2. 出口预筛（强制 HK：提取→出口 IP→归属地校验→Dola 可达，失败换 sid，无 any 降级）。
-          //    Google 分流线路已在批量开始探活一次，这里不重复探（转发器仍按域名分流）。
+          // 2. 出口获取：直连模式（phantom-local）轻量探测；网关模式强制预筛。
           let proxy;
-          try {
-            proxy = await this.proxyService.screenStickyExit(this._screenConfig, {
-              region: this.region,
-              maxAttempts: 3,
-              googleProxy: null,
-              onAttempt: (i, msg) => mark({ step: `[预筛 ${i}] ${msg}` }),
-            });
-          } catch (e3) {
-            if (e3.code === 'BUDGET_EXHAUSTED') throw e3;
-            // 无降级：HK 预筛失败按本轮失败处理（外层换 sid 进入下一轮），如实记录 HK 池状态
-            this._hk.fail += 1;
-            this._hk.streak += 1;
-            this._hk.lastError = String(e3.message || e3).slice(0, 120);
-            if (this._hk.streak >= HK_STREAK_ALERT) {
-              mark({
-                step: `⛔ HK 出口预筛已连续失败 ${this._hk.streak} 次（最近错误：${this._hk.lastError}）——疑似 HK 池整体异常，继续仅用 HK 换 sid 重试`,
-                hkAlert: true,
+          if (this.directMode) {
+            // 直连模式：phantomExitProbe 经本地混合端口探出口国家 → 时区归类（HK/TW/其他+警告）。
+            // 不消耗提取预算；失败按 SLOW_NETWORK 语义处理（同出口换指纹重试）。
+            try {
+              const probeExit = await this.proxyService.phantomExitProbe(this.browserProxy, {
+                onAttempt: (msg) => mark({ step: msg }),
               });
-            } else {
-              mark({ step: `${this.region.toUpperCase()} 预筛失败（${String(e3.message).slice(0, 60)}）→ 换 sid 重试（HK 池累计失败 ${this._hk.fail} 次）` });
+              this._hk.streak = 0;
+              this._hk.success += 1;
+              this._hk.exits.push({
+                ip: probeExit.ip, country: probeExit.country, city: probeExit.city,
+                isp: probeExit.isp, sid: null, at: new Date().toISOString(),
+              });
+              proxy = {
+                host: this.browserProxy.host,
+                port: this.browserProxy.port,
+                protocol: 'http',
+                noAuth: true, // launcher 据此直接挂代理，不启认证转发器
+                region: probeExit.region,
+                tz: probeExit.tz,
+                warn: probeExit.warn || '',
+                exit: { ip: probeExit.ip, country: probeExit.country, region: probeExit.regionName, city: probeExit.city, isp: probeExit.isp },
+              };
+            } catch (e3) {
+              this._hk.fail += 1;
+              this._hk.streak += 1;
+              this._hk.lastError = String(e3.message || e3).slice(0, 120);
+              mark({ step: `Phantom 出口探测失败（${this._hk.lastError}）→ 换指纹重试（累计失败 ${this._hk.fail} 次）` });
+              const wrapped = new Error(String(e3.message || e3));
+              wrapped.code = e3.code || 'SLOW_NETWORK';
+              throw wrapped;
             }
-            throw e3;
+          } else {
+            // 出口预筛（强制配置地区归属：提取→出口 IP→归属地校验→Dola 可达，失败换 sid，无 any 降级）。
+            //    Google 分流线路已在批量开始探活一次，这里不重复探（转发器仍按域名分流）。
+            try {
+              proxy = await this.proxyService.screenStickyExit(this._screenConfig, {
+                region: this.region,
+                maxAttempts: 3,
+                googleProxy: null,
+                onAttempt: (i, msg) => mark({ step: `[预筛 ${i}] ${msg}` }),
+              });
+            } catch (e3) {
+              if (e3.code === 'BUDGET_EXHAUSTED') throw e3;
+              // 无降级：出口预筛失败按本轮失败处理（外层换 sid 进入下一轮），如实记录出口池状态（字段名 _hk/hk 为历史命名，UI 与测试依赖，不改）
+              this._hk.fail += 1;
+              this._hk.streak += 1;
+              this._hk.lastError = String(e3.message || e3).slice(0, 120);
+              if (this._hk.streak >= HK_STREAK_ALERT) {
+                mark({
+                  step: `⛔ ${this.region.toUpperCase()} 出口预筛已连续失败 ${this._hk.streak} 次（最近错误：${this._hk.lastError}）——疑似 ${this.region.toUpperCase()} 池整体异常，继续仅用 ${this.region.toUpperCase()} 换 sid 重试`,
+                  hkAlert: true,
+                });
+              } else {
+                mark({ step: `${this.region.toUpperCase()} 预筛失败（${String(e3.message).slice(0, 60)}）→ 换 sid 重试（${this.region.toUpperCase()} 池累计失败 ${this._hk.fail} 次）` });
+              }
+              throw e3;
+            }
           }
-          this._hk.streak = 0;
-          this._hk.success += 1;
-          this._hk.exits.push({
-            ip: proxy.exit.ip, country: proxy.exit.country, city: proxy.exit.city,
-            isp: proxy.exit.isp, sid: proxy.sid, at: new Date().toISOString(),
-          });
           this.store.update(env.id, { proxy, proxyTest: proxy.exit });
           const exit = { ip: proxy.exit.ip, country: proxy.exit.country, isp: proxy.exit.isp };
-          mark({ state: 'running', exit, step: `出口已固定（${exit.ip} · ${exit.country} · ${exit.isp}），启动浏览器注册` });
+          mark({
+            state: 'running',
+            exit,
+            step: `出口已固定（${exit.ip} · ${exit.country}${proxy.warn ? ` · ⚠️${proxy.warn}` : ''} · ${exit.isp || '-'}），启动浏览器注册`,
+          });
 
-          // 3. 启动环境（指纹注入 + 本地认证转发器分流；headless=隐身不弹窗）+ 全自动注册（验证即换牌）
+          // 3. 启动环境（指纹注入 + 代理挂载；直连模式不启转发器；headless=隐身不弹窗）
+          //    + 注册驱动：直连模式 + FB 账号配置 → registerDolaViaFacebook（FB 登录→绑定谷歌→解绑 FB）；
+          //    否则走旧版 Google OAuth 直注 registerDola。
           await this.launcher.launchEnv(this.store.get(env.id), this.store.profilesDir, { headless: this.headless });
           this.store.update(env.id, { lastUsedAt: new Date().toISOString() });
           await sleep(2000);
-          const reg = await this.registerer.registerDola({
+          const useFbFlow = this.directMode && this.fbAccount && typeof this.registerer.registerDolaViaFacebook === 'function';
+          const regFn = useFbFlow
+            ? this.registerer.registerDolaViaFacebook
+            : this.registerer.registerDola;
+          const reg = await regFn({
             env: this.store.get(env.id),
             account,
+            fbAccount: useFbFlow ? this.fbAccount : undefined,
             autoMode: true,
+            keepOpen: this.keepOpen,
             onProgress: (s, d) => mark({ step: d ? `${s}（${d}）` : s }),
             saveCookies: (em) => this.exportCookies(this.store.get(env.id), em),
           });
@@ -266,7 +326,7 @@ class BatchRunner {
           mark({
             state: 'success',
             exit,
-            step: `✅ 成功：Cookie ${ci.count} 条${ci.missingCore && ci.missingCore.length ? `（⚠️ 缺核心字段：${ci.missingCore.join(', ')}）` : '（含核心登录态）'}`,
+            step: `✅ 成功：Cookie ${ci.count} 条${ci.missingCore && ci.missingCore.length ? `（⚠️ 缺核心字段：${ci.missingCore.join(', ')}）` : '（含核心登录态）'}${this.keepOpen ? ' · 浏览器窗口已保留，可手动测试' : ''}`,
           });
           this._emitStats(true);
         } catch (err) {
@@ -295,7 +355,9 @@ class BatchRunner {
       }
     } finally {
       // 收尾：关浏览器；成功保留环境，失败删环境并回写
-      if (this.launcher.isRunning(env.id)) await this.launcher.closeEnv(env.id).catch(() => {});
+      // keepOpen 模式：成功时保留浏览器窗口（含认证转发器，用户手动关窗由 launcher 的 context.on('close') 清理），
+      // 失败/熔断路径照常关窗（catch 分支已关，此处不重复关）
+      if (this.launcher.isRunning(env.id) && !(success && this.keepOpen)) await this.launcher.closeEnv(env.id).catch(() => {});
       if (!success) {
         if (this._stopped && this._stopReason === 'manual' && roundsTried === 0) {
           // 手动停止且尚未开始任何一轮：释放回账号池，不计失败

@@ -1,6 +1,11 @@
 {
-  "concurrency": -1,
+  "concurrency": 1,
   "exportDir": "",
   "maxExtractBudget": -1,
-  "headless": true
+  "headless": false,
+  "keepOpenAfterRegister": true,
+  "facebook": {
+    "email": "15634110089@163.com",
+    "password": "zxc12300"
+  }
 }
